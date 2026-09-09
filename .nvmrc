@@ -1,0 +1,2 @@
+echo "lts/*" > .nvmrc
+nvm use
