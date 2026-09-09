@@ -12,6 +12,8 @@ Output files are named in playlist order like:
 `02 - Video Title.mp3`  
 ...
 
+![screenshot of progress bars](screenshot.png)
+
 ---
 
 ## Features
