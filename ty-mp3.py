@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
+
 """
+If PLAYLIST_URLS contains items, it quickly extracts the individual video URLs, deduplicates them against your static list, and processes them seamlessly in order.
+
 Sequential YouTube -> MP3 (320k) with simple Rich progress bars.
 
-USAGE
+USAGE:
 -----
 1) Install dependencies:
    pip install yt-dlp rich
@@ -28,11 +31,11 @@ USAGE
    python yt-mp3.py
 
 
-optional in-line for a single video: yt-dlp --cookies youtube_cookies.txt -f "bestaudio/best" -o "test.%(ext)s" "https://www.youtube.com/watch?v=4Oi4ghnBoRw"
+optional in-line for a single video: yt-dlp --cookies youtube_cookies.txt -f "bestaudio/best" -o "test.%(ext)s" "https://youtube.com"
 """
 
 from __future__ import annotations
-
+from urllib.parse import parse_qs, urlparse
 import json
 import re
 import shutil
@@ -59,11 +62,24 @@ from rich.progress import (
 # =========================
 # CONFIG
 # =========================
-OUTPUT_FOLDER: str = "CD237" # last one CD236
+
+FFMPEG_BIN: str = "/usr/bin/ffmpeg"
+FFMPEG_THREADS: int = 1
+MAX_RETRIES: int = 2
+
+OUTPUT_FOLDER: str = "2026_NEW" # last one CD243
 
 URLS: list[str] = [
-	"https://www.youtube.com/watch?v=4Oi4ghnBoRw"
 	# ... list youtube urls here 
+
+]
+
+# Add your playlist URLs here. 
+# If left empty, the script will naturally just process individual video URLs.
+PLAYLIST_URLS: list[str] = [
+	"https://youtube.com/playlist?list=PLGnoGOm5niHsNAnUYXvX0zlfYEr6hp1bf&si=A9_Hs5vGtCAgpuRr",
+	"https://youtube.com/playlist?list=PLGnoGOm5niHtVGGhHLCIXexGXaFbirrmN&si=pqQxTEd6Q0oOXjlo",
+
 ]
 
 FFMPEG_THREADS: int = 1
@@ -164,7 +180,10 @@ def ydl_base_opts() -> Dict[str, Any]:
 	return {
 		"quiet": True,
 		"no_warnings": True,
+
+		# Every URL passed to process_one() must be treated as one video, even if the original URL contains a playlist parameter.
 		"noplaylist": True,
+
 		"cookiefile": GENERATED_COOKIES_TXT,
 		"retries": 10,
 		"extractor_retries": 10,
@@ -183,7 +202,7 @@ def extract_info(url: str) -> Dict[str, Any]:
 
 def ffmpeg_encode(src: Path, dst: Path, title: str) -> None:
 	cmd = [
-		"ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+		FFMPEG_BIN, "-y", "-hide_banner", "-loglevel", "error",
 		"-threads", str(FFMPEG_THREADS),
 		"-i", str(src),
 		"-vn",
@@ -210,7 +229,7 @@ def process_one(index: int, url: str, output_dir: Path, progress: Progress, task
 			yt_title = raw_title if isinstance(raw_title, str) and raw_title.strip() else "untitled"
 			safe_title = sanitize_for_filename(yt_title)
 
-			final_mp3 = unique_output_path(output_dir / f"{index:02d} - {safe_title}.mp3")
+			final_mp3 = unique_output_path(output_dir / f"{index:03d} - {safe_title}.mp3")
 			outtmpl = str(tmpdir / "source.%(ext)s")
 
 			def hook(d: Dict[str, Any]) -> None:
@@ -243,7 +262,7 @@ def process_one(index: int, url: str, output_dir: Path, progress: Progress, task
 			start = time.time()
 			proc = subprocess.Popen(
 				[
-					"ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+					FFMPEG_BIN, "-y", "-hide_banner", "-loglevel", "error",
 					"-threads", str(FFMPEG_THREADS),
 					"-i", str(src), "-vn",
 					"-codec:a", "libmp3lame", "-b:a", "320k",
@@ -266,7 +285,7 @@ def process_one(index: int, url: str, output_dir: Path, progress: Progress, task
 				raise RuntimeError((err or "").strip() or "ffmpeg failed")
 
 			progress.update(task_id, completed=100.0)
-			return f"[OK] {index}: {final_mp3.name}"
+			return f"[OK] {index:03d}: {final_mp3.name}"
 
 		except Exception as e:
 			last_err = e
@@ -275,48 +294,256 @@ def process_one(index: int, url: str, output_dir: Path, progress: Progress, task
 			shutil.rmtree(tmpdir, ignore_errors=True)
 
 	progress.update(task_id, completed=100.0)
-	return f"[FAIL] {index}: {url} -> {last_err}"
-
-
-def main() -> None:
-	console = Console()
-	outdir = Path(OUTPUT_FOLDER)
-
-	if outdir.exists():
-		console.print(f"[red]ERROR:[/red] Folder '{OUTPUT_FOLDER}' already exists. Aborting.")
-		sys.exit(1)
-
-	try:
-		convert_devtools_json_to_netscape(Path(YOUTUBE_COOKIES_JSON), Path(GENERATED_COOKIES_TXT))
-	except Exception as e:
-		console.print(f"[red]ERROR:[/red] Cookie conversion failed: {e}")
-		sys.exit(1)
-
-	outdir.mkdir(parents=True, exist_ok=False)
-
-	console.print(f"Starting sequential batch: {len(URLS)} URLs")
-	results: list[str] = []
-
-	progress = Progress(
-		TextColumn("{task.description}"),
-		BarColumn(),
-		TaskProgressColumn(),
-		TimeElapsedColumn(),
-		TimeRemainingColumn(),
-		console=console,
-		transient=False,
+	return (
+		f"[ERROR] {index:03d}: {url} failed after "
+		f"{MAX_RETRIES} attempts. Last error: {last_err}"
 	)
 
-	with progress:
-		for i, url in enumerate(URLS, start=1):
-			task_id = progress.add_task(f"#{i}", total=100.0, completed=0.0)
-			result = process_one(i, url, outdir, progress, task_id)
-			results.append(result)
 
-	for line in results:
-		console.print(line)
-	console.print("Done.")
+YOUTUBE_VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+
+
+def extract_youtube_video_id(value: str) -> Optional[str]:
+	"""
+	Extract a YouTube video ID from common URL forms or from a bare ID.
+
+	Supported examples:
+	  dQw4w9WgXcQ
+	  https://www.youtube.com/watch?v=dQw4w9WgXcQ
+	  https://youtu.be/dQw4w9WgXcQ
+	  https://www.youtube.com/shorts/dQw4w9WgXcQ
+	  https://www.youtube.com/embed/dQw4w9WgXcQ
+	  https://www.youtube.com/live/dQw4w9WgXcQ
+	"""
+	value = value.strip()
+
+	if YOUTUBE_VIDEO_ID_RE.fullmatch(value):
+		return value
+
+	try:
+		parsed = urlparse(value)
+	except ValueError:
+		return None
+
+	host = (parsed.hostname or "").lower()
+	path_parts = [part for part in parsed.path.split("/") if part]
+
+	if host in {"youtu.be", "www.youtu.be"}:
+		if path_parts and YOUTUBE_VIDEO_ID_RE.fullmatch(path_parts[0]):
+			return path_parts[0]
+		return None
+
+	if host == "youtube.com" or host.endswith(".youtube.com"):
+		query = parse_qs(parsed.query)
+
+		video_values = query.get("v")
+		if video_values:
+			video_id = video_values[0]
+			if YOUTUBE_VIDEO_ID_RE.fullmatch(video_id):
+				return video_id
+
+		if len(path_parts) >= 2 and path_parts[0] in {
+			"shorts",
+			"embed",
+			"live",
+			"v",
+		}:
+			video_id = path_parts[1]
+			if YOUTUBE_VIDEO_ID_RE.fullmatch(video_id):
+				return video_id
+
+	return None
+
+
+def canonical_youtube_url(video_id: str) -> str:
+	return f"https://www.youtube.com/watch?v={video_id}"
+
+
+def resolve_all_urls(
+	playlist_urls: list[str],
+	static_urls: list[str],
+) -> list[str]:
+	"""
+	Create one ordered list containing:
+
+	1. Unique videos from URLS, in their configured order.
+	2. Unique videos extracted from PLAYLIST_URLS, in playlist order.
+
+	Deduplication is performed using the YouTube video ID, so URL parameters
+	and alternate URL forms do not result in duplicate downloads.
+	"""
+	combined_urls: list[str] = []
+	seen_video_ids: set[str] = set()
+	seen_other_urls: set[str] = set()
+
+	def add_video(candidate: str) -> bool:
+		candidate = candidate.strip()
+		if not candidate:
+			return False
+
+		video_id = extract_youtube_video_id(candidate)
+
+		if video_id:
+			if video_id in seen_video_ids:
+				return False
+
+			seen_video_ids.add(video_id)
+			combined_urls.append(canonical_youtube_url(video_id))
+			return True
+
+		# Preserve an unrecognized URL so yt-dlp can try it, while still
+		# removing exact duplicates.
+		if candidate in seen_other_urls:
+			return False
+
+		seen_other_urls.add(candidate)
+		combined_urls.append(candidate)
+		return True
+
+	# Add and deduplicate the manually configured videos first.
+	for url in static_urls:
+		add_video(url)
+
+	if not playlist_urls:
+		return combined_urls
+
+	print(f"Checking {len(playlist_urls)} playlist(s) for additional videos...")
+
+	playlist_opts: Dict[str, Any] = {
+		"quiet": True,
+		"no_warnings": True,
+		"extract_flat": True,
+		"skip_download": True,
+
+		# Playlist extraction must be enabled here.
+		"noplaylist": False,
+
+		# Continue when an individual deleted/private playlist entry
+		# cannot be resolved.
+		"ignoreerrors": True,
+
+		"retries": 10,
+		"extractor_retries": 10,
+	}
+
+	if Path(GENERATED_COOKIES_TXT).is_file():
+		playlist_opts["cookiefile"] = GENERATED_COOKIES_TXT
+
+	with yt_dlp.YoutubeDL(playlist_opts) as ydl:
+		for playlist_url in playlist_urls:
+			try:
+				info = ydl.extract_info(playlist_url, download=False)
+
+				if not isinstance(info, dict):
+					print(f"  [Warning] No playlist information: {playlist_url}")
+					continue
+
+				entries = info.get("entries") or []
+				added_count = 0
+				duplicate_count = 0
+				unavailable_count = 0
+
+				for entry in entries:
+					if not isinstance(entry, dict):
+						unavailable_count += 1
+						continue
+
+					# Flat playlist extraction normally supplies the ID directly. Fall back to URL-related fields if needed.
+					candidate = (
+						entry.get("id")
+						or entry.get("webpage_url")
+						or entry.get("url")
+					)
+
+					if not isinstance(candidate, str):
+						unavailable_count += 1
+						continue
+
+					if add_video(candidate):
+						added_count += 1
+					else:
+						duplicate_count += 1
+
+				playlist_title = info.get("title")
+				if not isinstance(playlist_title, str):
+					playlist_title = playlist_url
+
+				print(
+					f"  -> {playlist_title}: "
+					f"{added_count} added, "
+					f"{duplicate_count} duplicates, "
+					f"{unavailable_count} unavailable"
+				)
+
+			except Exception as e:
+				print(
+					f"  [Warning] Could not read playlist "
+					f"({playlist_url}): {e}"
+				)
+
+	return combined_urls
 
 
 if __name__ == "__main__":
-	main()
+	console = Console()
+
+	# Prepare cookies
+	json_p = Path(YOUTUBE_COOKIES_JSON)
+	txt_p = Path(GENERATED_COOKIES_TXT)
+
+	if json_p.exists():
+		try:
+			convert_devtools_json_to_netscape(json_p, txt_p)
+		except Exception as e:
+			console.print(f"[bold red]Cookie conversion failed:[/bold red] {e}")
+			sys.exit(1)
+	elif not txt_p.exists():
+		console.print("[bold yellow]Warning: No cookies found. Download might fail or be throttled.[/bold yellow]")
+
+	# Build the consolidated download list from both target fields
+	FINAL_DOWNLOAD_LIST = resolve_all_urls(PLAYLIST_URLS, URLS)
+	if not FINAL_DOWNLOAD_LIST:
+		console.print("[bold red]No track or playlist URLs found to download.[/bold red]")
+		sys.exit(0)
+	
+	out_dir = Path(OUTPUT_FOLDER)
+	out_dir.mkdir(parents=True, exist_ok=True)
+	console.print(f"[bold green]Starting batch download of {len(FINAL_DOWNLOAD_LIST)} tracks to folder '{OUTPUT_FOLDER}'...[/bold green]\n")
+	
+	# Main download pipeline pointed directly to our unified list
+	with Progress(
+			TextColumn("{task.description}"),
+			BarColumn(),
+			TaskProgressColumn(),
+			TimeElapsedColumn(),
+			TimeRemainingColumn(),
+			console=console,
+		) as progress:
+			task_id = progress.add_task(
+				"Preparing...",
+				total=100.0,
+				completed=0.0,
+			)
+
+			total_tracks = len(FINAL_DOWNLOAD_LIST)
+
+			for i, url in enumerate(FINAL_DOWNLOAD_LIST, start=1):
+				progress.reset(
+					task_id,
+					description=f"Track {i:03d}/{total_tracks:03d}",
+					total=100.0,
+					completed=0.0,
+					start=True,
+				)
+
+				res = process_one(
+					i,
+					url,
+					out_dir,
+					progress,
+					task_id,
+				)
+				progress.print(res)
+
+			console.print("\n[bold green]Batch processing completed.[/bold green]")
+
